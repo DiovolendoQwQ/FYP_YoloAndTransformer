@@ -1,10 +1,14 @@
 import argparse
 import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import sys
 import time
 import json
 import re
 import torch
+import csv
+from pathlib import Path
+import matplotlib.pyplot as plt
 import torch.nn as nn
 from ultralytics import YOLO
 
@@ -79,7 +83,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=3)
     parser.add_argument('--batch', type=int, default=16)
     parser.add_argument('--iters', type=int, default=50)
-    parser.add_argument('--conf', type=float, default=0.25)
+    parser.add_argument('--conf', type=float, default=0.205)
     parser.add_argument('--iou', type=float, default=0.6)
     parser.add_argument('--cbam_layers', type=str, default='model.18,model.21')
     parser.add_argument('--cbam_reduction', type=int, default=16)
@@ -93,6 +97,9 @@ def main():
     parser.add_argument('--tr_residual_scale', type=float, default=1.0)
     parser.add_argument('--sweep', action='store_true')
     parser.add_argument('--sweep_confs', type=str, default='0.2,0.25,0.3,0.35')
+    parser.add_argument('--only_attn', action='store_true')
+    parser.add_argument('--dataset_root', type=str, default=None)
+    parser.add_argument('--dual_out', action='store_true')
     args = parser.parse_args()
     device_arg = args.device if torch.cuda.is_available() else 'cpu'
 
@@ -125,29 +132,76 @@ def main():
                             pass
         return f"{date_str}_{model_label}_第{idx}次训练"
 
+    def next_dual_root():
+        date_str = time.strftime('%Y-%m-%d')
+        project_dir = os.path.join(os.getcwd(), 'exp')
+        idx = 1
+        if os.path.isdir(project_dir):
+            for d in os.listdir(project_dir):
+                if d.startswith(f"{date_str}_2模型训练_第"):
+                    m = re.search(r"第(\d+)次训练", d)
+                    if m:
+                        try:
+                            idx = max(idx, int(m.group(1)) + 1)
+                        except Exception:
+                            pass
+        return f"{date_str}_2模型训练_第{idx}次训练"
+
     base_name = next_train_name('yolo')
     attn_label = 'yolo+transform' if args.attn == 'transformer' else 'yolo'
     cbam_name = next_train_name(attn_label)
 
-    base.train(data=args.data, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project='exp', name=base_name, plots=False)
-    cbam.train(data=args.data, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project='exp', name=cbam_name, plots=False)
+    root_project = os.path.join(os.getcwd(), 'exp', next_dual_root()) if args.dual_out else os.path.join(os.getcwd(), 'exp')
+    yolo_run_name = f"yolo_epoch{args.epochs}" if args.dual_out else base_name
+    attn_run_name = f"{attn_label}_epoch{args.epochs}" if args.dual_out else cbam_name
 
-    mb = base.val(data=args.data, imgsz=args.imgsz, device=device_arg, split='val', conf=args.conf, iou=args.iou, save_json=True, project='runs/detect', name=base_name)
-    mc = cbam.val(data=args.data, imgsz=args.imgsz, device=device_arg, split='val', conf=args.conf, iou=args.iou, save_json=True, project='runs/detect', name=cbam_name)
+    data_arg = args.data
+    if args.dataset_root:
+        root = os.path.normpath(args.dataset_root)
+        coco_path = os.path.join(root, 'coco128')
+        yaml_path = os.path.join(os.getcwd(), 'datasets', 'runtime_coco128.yaml')
+        os.makedirs(os.path.dirname(yaml_path), exist_ok=True)
+        names = [
+            'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
+            'fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow',
+            'elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
+            'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle',
+            'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed',
+            'dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'
+        ]
+        with open(yaml_path, 'w', encoding='utf-8') as f:
+            f.write(f"path: {coco_path}\n")
+            f.write("train: images/train2017\n")
+            f.write("val: images/train2017\n")
+            f.write("names:\n")
+            for i, n in enumerate(names):
+                f.write(f"  {i}: {n}\n")
+        data_arg = yaml_path
+
+    if args.only_attn:
+        cbam.train(data=data_arg, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project=root_project, name=attn_run_name, plots=True)
+    else:
+        base.train(data=data_arg, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project=root_project, name=yolo_run_name, plots=True)
+        cbam.train(data=data_arg, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project=root_project, name=attn_run_name, plots=True)
+
+    mb = None
+    if not args.only_attn:
+        mb = base.val(data=data_arg, imgsz=args.imgsz, device=device_arg, split='val', conf=args.conf, iou=args.iou, save_json=True, project=root_project, name=f'{yolo_run_name}_val', plots=True)
+    mc = cbam.val(data=data_arg, imgsz=args.imgsz, device=device_arg, split='val', conf=args.conf, iou=args.iou, save_json=True, project=root_project, name=f'{attn_run_name}_val', plots=True)
 
     base_params = count_params(base.model)
     cbam_params = count_params(cbam.model)
-    base_fps = measure_fps(base, imgsz=args.imgsz, device=args.device, iters=args.iters, batch=args.batch)
+    base_fps = None if args.only_attn else measure_fps(base, imgsz=args.imgsz, device=args.device, iters=args.iters, batch=args.batch)
     cbam_fps = measure_fps(cbam, imgsz=args.imgsz, device=args.device, iters=args.iters, batch=args.batch)
 
-    base_map = float(getattr(mb.box, 'map', 0.0)) if hasattr(mb, 'box') else 0.0
-    base_map50 = float(getattr(mb.box, 'map50', 0.0)) if hasattr(mb, 'box') else 0.0
+    base_map = float(getattr(mb.box, 'map', 0.0)) if (mb is not None and hasattr(mb, 'box')) else 0.0
+    base_map50 = float(getattr(mb.box, 'map50', 0.0)) if (mb is not None and hasattr(mb, 'box')) else 0.0
     cbam_map = float(getattr(mc.box, 'map', 0.0)) if hasattr(mc, 'box') else 0.0
     cbam_map50 = float(getattr(mc.box, 'map50', 0.0)) if hasattr(mc, 'box') else 0.0
 
     base_dt = None
     cbam_dt = None
-    if hasattr(mb, 'save_dir'):
+    if mb is not None and hasattr(mb, 'save_dir'):
         p = os.path.join(mb.save_dir, 'predictions.json')
         if os.path.isfile(p):
             base_dt = p
@@ -189,14 +243,14 @@ def main():
         }
         confs = [float(s.strip()) for s in args.sweep_confs.split(',') if s.strip()]
         for c in confs:
-            rb = base.val(data=args.data, imgsz=args.imgsz, device=device_arg, split='val', conf=c, iou=args.iou, save_json=True, project='runs/detect', name=f'{base_name}_c{int(c*100)}')
-            rbc = None
-            bd = os.path.join(getattr(rb, 'save_dir', os.path.join('runs','detect',f'{base_name}_c{int(c*100)}')) , 'predictions.json')
-            sm = None
-            if gt_json_path and os.path.isfile(bd):
-                sm = coco_aps_small(gt_json_path, bd)
-            sweep_results['baseline'].append({'conf': c, 'mAP50-95': float(getattr(rb.box,'map',0.0)) if hasattr(rb,'box') else 0.0, 'mAP50': float(getattr(rb.box,'map50',0.0)) if hasattr(rb,'box') else 0.0, 'mAP_small': sm})
-            rc = cbam.val(data=args.data, imgsz=args.imgsz, device=device_arg, split='val', conf=c, iou=args.iou, save_json=True, project='runs/detect', name=f'{cbam_name}_c{int(c*100)}')
+            if not args.only_attn:
+                rb = base.val(data=data_arg, imgsz=args.imgsz, device=device_arg, split='val', conf=c, iou=args.iou, save_json=True, project='runs/detect', name=f'{base_name}_c{int(c*100)}')
+                bd = os.path.join(getattr(rb, 'save_dir', os.path.join('runs','detect',f'{base_name}_c{int(c*100)}')) , 'predictions.json')
+                sm = None
+                if gt_json_path and os.path.isfile(bd):
+                    sm = coco_aps_small(gt_json_path, bd)
+                sweep_results['baseline'].append({'conf': c, 'mAP50-95': float(getattr(rb.box,'map',0.0)) if hasattr(rb,'box') else 0.0, 'mAP50': float(getattr(rb.box,'map50',0.0)) if hasattr(rb,'box') else 0.0, 'mAP_small': sm})
+            rc = cbam.val(data=data_arg, imgsz=args.imgsz, device=device_arg, split='val', conf=c, iou=args.iou, save_json=True, project='runs/detect', name=f'{cbam_name}_c{int(c*100)}')
             cd = os.path.join(getattr(rc, 'save_dir', os.path.join('runs','detect',f'{cbam_name}_c{int(c*100)}')) , 'predictions.json')
             smc = None
             if gt_json_path and os.path.isfile(cd):
@@ -240,6 +294,72 @@ def main():
         'sweep': sweep_results
     }
     print(json.dumps(summary, indent=2))
+
+    def _read_results_csv(csv_path):
+        xs = {}
+        with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+            r = csv.DictReader(f)
+            for i, row in enumerate(r):
+                for k, v in row.items():
+                    try:
+                        val = float(v)
+                    except Exception:
+                        continue
+                    xs.setdefault(k, []).append(val)
+        return xs
+
+    def _plot_two_curves(out_png, title, ylabel, x_values, y1, y2, label1='yolo', label2='yolo+transform'):
+        plt.figure(figsize=(8,5))
+        plt.plot(x_values, y1, label=label1)
+        plt.plot(x_values, y2, label=label2)
+        plt.title(title)
+        plt.xlabel('epoch')
+        plt.ylabel(ylabel)
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_png)
+        plt.close()
+
+    if args.dual_out and (not args.only_attn):
+        yolo_dir = os.path.join(root_project, yolo_run_name)
+        attn_dir = os.path.join(root_project, attn_run_name)
+        y_csv = os.path.join(yolo_dir, 'results.csv')
+        a_csv = os.path.join(attn_dir, 'results.csv')
+        if os.path.isfile(y_csv) and os.path.isfile(a_csv):
+            y = _read_results_csv(y_csv)
+            a = _read_results_csv(a_csv)
+            epochs_list = list(range(1, 1 + min(len(y.get('train/box_loss', [])), len(a.get('train/box_loss', [])))))
+            out_dir = Path(root_project)
+            _plot_two_curves(out_dir / 'compare_train_box_loss.png', 'Train Box Loss', 'loss', epochs_list, y.get('train/box_loss', []), a.get('train/box_loss', []))
+            _plot_two_curves(out_dir / 'compare_val_box_loss.png', 'Val Box Loss', 'loss', epochs_list, y.get('val/box_loss', []), a.get('val/box_loss', []))
+            _plot_two_curves(out_dir / 'compare_train_cls_loss.png', 'Train Cls Loss', 'loss', epochs_list, y.get('train/cls_loss', []), a.get('train/cls_loss', []))
+            _plot_two_curves(out_dir / 'compare_val_cls_loss.png', 'Val Cls Loss', 'loss', epochs_list, y.get('val/cls_loss', []), a.get('val/cls_loss', []))
+            _plot_two_curves(out_dir / 'compare_train_dfl_loss.png', 'Train DFL Loss', 'loss', epochs_list, y.get('train/dfl_loss', []), a.get('train/dfl_loss', []))
+            _plot_two_curves(out_dir / 'compare_val_dfl_loss.png', 'Val DFL Loss', 'loss', epochs_list, y.get('val/dfl_loss', []), a.get('val/dfl_loss', []))
+            _plot_two_curves(out_dir / 'compare_precision.png', 'Precision vs Epoch', 'precision', epochs_list, y.get('metrics/precision', []), a.get('metrics/precision', []))
+            _plot_two_curves(out_dir / 'compare_recall.png', 'Recall vs Epoch', 'recall', epochs_list, y.get('metrics/recall', []), a.get('metrics/recall', []))
+            _plot_two_curves(out_dir / 'compare_map50.png', 'mAP50 vs Epoch', 'mAP50', epochs_list, y.get('metrics/mAP50', []), a.get('metrics/mAP50', []))
+            _plot_two_curves(out_dir / 'compare_map50-95.png', 'mAP50-95 vs Epoch', 'mAP50-95', epochs_list, y.get('metrics/mAP50-95', []), a.get('metrics/mAP50-95', []))
+
+        # copy val visual plots into common root
+        for name, label in ((f'{yolo_run_name}_val', 'yolo'), (f'{attn_run_name}_val', 'yolo+transform')):
+            val_dir = Path(root_project) / name
+            if val_dir.exists():
+                for src, dst in (
+                    ('PR_curve.png', f'{label}_PR_curve.png'),
+                    ('F1_curve.png', f'{label}_F1_conf_curve.png'),
+                    ('P_curve.png', f'{label}_Precision_conf_curve.png'),
+                    ('R_curve.png', f'{label}_Recall_conf_curve.png'),
+                    ('confusion_matrix.png', f'{label}_confusion_matrix.png'),
+                    ('confusion_matrix_raw.png', f'{label}_confusion_matrix_raw.png'),
+                ):
+                    p = val_dir / src
+                    if p.exists():
+                        try:
+                            (Path(root_project) / dst).write_bytes(p.read_bytes())
+                        except Exception:
+                            pass
 
 if __name__ == '__main__':
     main()
