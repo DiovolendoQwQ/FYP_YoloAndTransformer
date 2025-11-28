@@ -83,9 +83,9 @@ def main():
     parser.add_argument('--epochs', type=int, default=3)
     parser.add_argument('--batch', type=int, default=16)
     parser.add_argument('--iters', type=int, default=50)
-    parser.add_argument('--conf', type=float, default=0.205)
+    parser.add_argument('--conf', type=float, default=0.2)
     parser.add_argument('--iou', type=float, default=0.6)
-    parser.add_argument('--cbam_layers', type=str, default='model.18,model.21')
+    parser.add_argument('--cbam_layers', type=str, default='model.10,model.13,model.18')
     parser.add_argument('--cbam_reduction', type=int, default=16)
     parser.add_argument('--cbam_min_size', type=int, default=64)
     parser.add_argument('--cbam_residual_scale', type=float, default=0.0)
@@ -93,11 +93,12 @@ def main():
     parser.add_argument('--tr_heads', type=int, default=8)
     parser.add_argument('--tr_ff', type=int, default=None)
     parser.add_argument('--tr_dropout', type=float, default=0.1)
-    parser.add_argument('--tr_min_size', type=int, default=64)
+    parser.add_argument('--tr_min_size', type=int, default=32)
     parser.add_argument('--tr_residual_scale', type=float, default=1.0)
     parser.add_argument('--sweep', action='store_true')
     parser.add_argument('--sweep_confs', type=str, default='0.2,0.25,0.3,0.35')
-    parser.add_argument('--only_attn', action='store_true')
+    parser.add_argument('--only_attn', action='store_true', default=True)
+    parser.add_argument('--hyp', type=str, default=None)
     parser.add_argument('--dataset_root', type=str, default=None)
     parser.add_argument('--dual_out', action='store_true')
     args = parser.parse_args()
@@ -178,11 +179,21 @@ def main():
                 f.write(f"  {i}: {n}\n")
         data_arg = yaml_path
 
+    extra_kwargs = {}
+    if args.hyp:
+        try:
+            import yaml
+            with open(args.hyp, 'r', encoding='utf-8') as f:
+                hv = yaml.safe_load(f) or {}
+            if isinstance(hv, dict):
+                extra_kwargs.update(hv)
+        except Exception:
+            pass
     if args.only_attn:
-        cbam.train(data=data_arg, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project=root_project, name=attn_run_name, plots=True)
+        cbam.train(data=data_arg, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project=root_project, name=attn_run_name, plots=True, **extra_kwargs)
     else:
-        base.train(data=data_arg, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project=root_project, name=yolo_run_name, plots=True)
-        cbam.train(data=data_arg, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project=root_project, name=attn_run_name, plots=True)
+        base.train(data=data_arg, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project=root_project, name=yolo_run_name, plots=True, **extra_kwargs)
+        cbam.train(data=data_arg, imgsz=args.imgsz, device=device_arg, epochs=args.epochs, batch=args.batch, project=root_project, name=attn_run_name, plots=True, **extra_kwargs)
 
     mb = None
     if not args.only_attn:

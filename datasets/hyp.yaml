@@ -1,0 +1,5 @@
+mosaic: 1.0
+mixup: 0.2
+hsv_h: 0.015
+scale: 0.5
+translate: 0.1

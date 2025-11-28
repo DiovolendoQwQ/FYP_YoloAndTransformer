@@ -1,0 +1,1 @@
+训练模式时候使用gpu加速，我已经配置好环境`conda activate yolo-cuda`
